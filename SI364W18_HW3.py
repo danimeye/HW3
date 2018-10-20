@@ -1,5 +1,6 @@
 ## SI 364 - Winter 2018
 ## HW 3
+## worked with John Falcone, Nicole Ackerman-Greenberg, Lauren Sigurdson
 
 ####################
 ## Import statements
@@ -19,7 +20,7 @@ app.config['SECRET_KEY'] = 'hard to guess string from si364'
 ## TODO 364: Create a database in postgresql in the code line below, and fill in your app's database URI. It should be of the format: postgresql://localhost/YOUR_DATABASE_NAME
 
 ## Your final Postgres database should be your uniqname, plus HW3, e.g. "jczettaHW3" or "maupandeHW3"
-app.config["SQLALCHEMY_DATABASE_URI"] = ""
+app.config["SQLALCHEMY_DATABASE_URI"] = "postgres://daniellemeyerson@localhost:5432/danimeyeHW3"
 ## Provided:
 app.config['SQLALCHEMY_COMMIT_ON_TEARDOWN'] = True
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -64,6 +65,24 @@ db = SQLAlchemy(app) # For database use
 ## Should have a __repr__ method that returns strings of a format like:
 #### {username} | ID: {id}
 
+class Tweet(db.Model):
+    __tablename__ = 'tweets'
+    id = db.Column(db.Integer, primary_key=True)
+    text = db.Column(db.String(280))
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
+
+    def __repr__(self):
+        return '{} (ID: {})'.format(self.text, self.id)
+
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64))
+    display_name = db.Column(db.String(124))
+    tweets = db.relationship("Tweet", backref = "User")
+
+    def __repr__(self):
+        return '{} | ID: {}'.format(self.username, self.id)
 
 ########################
 ##### Set up Forms #####
@@ -77,12 +96,26 @@ db = SQLAlchemy(app) # For database use
 
 # HINT: Check out index.html where the form will be rendered to decide what field names to use in the form class definition
 
+class TwitterForm(FlaskForm):
+    text = StringField("Enter the text of the tweet (no more than 280 characters): ", validators = [Required(), Length(1,280)])
+    username = StringField("Enter the username of the twitter user (no '@'!): ", validators = [Required(), Length(1,64)])
+    display_name = StringField("Enter the display name for the twitter user (must be at least 2 words): ", validators = [Required()])
+    submit = SubmitField("Submit")
+
 # TODO 364: Set up custom validation for this form such that:
 # - the twitter username may NOT start with an "@" symbol (the template will put that in where it should appear)
 # - the display name MUST be at least 2 words (this is a useful technique to practice, even though this is not true of everyone's actual full name!)
+    
+    def validate_display_name(self, field):
+        user_input = field.data.split()
+        if len(user_input) < 2:
+            raise ValidationError("Your display name must be at least 2 words.")
 
+    def validate_username(self, field):
+        if "@" in field.data:
+            raise ValidationError("Your username may not include any @ symbols.")
 # TODO 364: Make sure to check out the sample application linked in the readme to check if yours is like it!
-
+## sample applicatoin checked!
 
 ###################################
 ##### Routes & view functions #####
@@ -118,11 +151,37 @@ def internal_server_error(e):
 @app.route('/', methods=['GET', 'POST'])
 def index():
     # Initialize the form
+    form = TwitterForm()
 
     # Get the number of Tweets
+    tweet_obj = Tweet.query.all() #specifies that this is going to be a query that returns Tweet objects
+    num_of_tweets = len(tweet_obj)
+
 
     # If the form was posted to this route,
     ## Get the data from the form
+
+    if request.method == 'POST' and form.validate_on_submit():
+        username = form.username.data
+        display_name = form.display_name.data
+
+        user = User.query.filter_by(username = username).first() # user either equals True or None
+        if not user: #if there is nothing in user
+            user = User(username=username, display_name=display_name)
+            db.session.add(user)
+            db.session.commit()
+        text = form.text.data
+        existing_tweet = Tweet.query.filter_by(text = text, user_id = user.id).first()
+        if existing_tweet:
+            flash('Sorry, you already tweeted this!')
+            return redirect(url_for('see_all_tweets'))
+
+        new_tweet = Tweet(text=text, user_id=user.id)
+        db.session.add(new_tweet)
+        db.session.commit()
+        flash('Tweet has been successfully tweeted and added to the database.')
+        return redirect(url_for('index'))
+
 
     ## Find out if there's already a user with the entered username
     ## If there is, save it in a variable: user
@@ -141,11 +200,18 @@ def index():
     errors = [v for v in form.errors.values()]
     if len(errors) > 0:
         flash("!!!! ERRORS IN FORM SUBMISSION - " + str(errors))
-    return render_template('index.html',) # TODO 364: Add more arguments to the render_template invocation to send data to index.html
+    return render_template('index.html', num_tweets = num_of_tweets, form = form) 
+    # TODO 364: Add more arguments to the render_template invocation to send data to index.html
 
 @app.route('/all_tweets')
 def see_all_tweets():
-    pass # Replace with code
+    tweets = Tweet.query.all()
+    tweets_users = []
+    for tweet in tweets:
+        user = User.query.filter_by(id = tweet.user_id).first()
+        tweets_users.append((tweet.text, user.username))
+
+    return render_template('all_tweets.html', all_tweets = tweets_users)
     # TODO 364: Fill in this view function so that it can successfully render the template all_tweets.html, which is provided.
     # HINT: Careful about what type the templating in all_tweets.html is expecting! It's a list of... not lists, but...
     # HINT #2: You'll have to make a query for the tweet and, based on that, another query for the username that goes with it...
@@ -153,11 +219,24 @@ def see_all_tweets():
 
 @app.route('/all_users')
 def see_all_users():
-    pass # Replace with code
+    users = User.query.all()
+    return render_template('all_users.html', users = users)
     # TODO 364: Fill in this view function so it can successfully render the template all_users.html, which is provided.
 
 # TODO 364
 # Create another route (no scaffolding provided) at /longest_tweet with a view function get_longest_tweet (see details below for what it should do)
+@app.route('/longest_tweet')
+def get_longest_tweet():
+    tweets = Tweet.query.all()
+    max_length = 0 
+    current_tweet = None
+    for tweet in tweets:
+        if len(tweet.text) > max_length:
+            max_length = len(tweet.text)
+            current_tweet = tweet
+    user = User.query.filter_by(id = current_tweet.user_id).first()
+    # pass back current_tweet and user 
+    return render_template('longest_tweet.html', longest_tweet = current_tweet, user = user)
 # TODO 364
 # Create a template to accompany it called longest_tweet.html that extends from base.html.
 
